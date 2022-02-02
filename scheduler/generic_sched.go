@@ -348,7 +348,7 @@ func (s *GenericScheduler) computeJobAllocs() error {
 	}
 
 	// Determine the tainted nodes containing job allocs
-	tainted, unknown, err := taintedAndUnknownNodes(s.state, allocs)
+	tainted, err := taintedNodes(s.state, allocs)
 	if err != nil {
 		return fmt.Errorf("failed to get tainted and unknown nodes for job '%s': %v",
 			s.eval.JobID, err)
@@ -360,7 +360,7 @@ func (s *GenericScheduler) computeJobAllocs() error {
 
 	reconciler := NewAllocReconciler(s.logger,
 		genericAllocUpdateFn(s.ctx, s.stack, s.eval.ID),
-		s.batch, s.eval.JobID, s.job, s.deployment, allocs, tainted, unknown, s.eval.ID, s.eval.Priority)
+		s.batch, s.eval.JobID, s.job, s.deployment, allocs, tainted, s.eval.ID, s.eval.Priority)
 	results := reconciler.Compute()
 	s.logger.Debug("reconciled current state with desired state", "results", log.Fmt("%#v", results))
 
@@ -402,6 +402,11 @@ func (s *GenericScheduler) computeJobAllocs() error {
 
 	// Handle the annotation updates
 	for _, update := range results.attributeUpdates {
+		s.ctx.Plan().AppendAlloc(update, nil)
+	}
+
+	// Handle disconnect updates
+	for _, update := range results.disconnectUpdates {
 		s.ctx.Plan().AppendAlloc(update, nil)
 	}
 

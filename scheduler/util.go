@@ -348,20 +348,14 @@ func progressMade(result *structs.PlanResult) bool {
 		len(result.DeploymentUpdates) != 0)
 }
 
-// taintedAndUnknownNodes is used to scan the allocations and then check if the
+// taintedNodes is used to scan the allocations and then check if the
 // underlying nodes are tainted, and should force a migration of the allocation.
-// All the nodes returned in the first map are tainted.
-// All teh nodes returned in teh second map are unknown.
-func taintedAndUnknownNodes(state State, allocs []*structs.Allocation) (map[string]*structs.Node, map[string]*structs.Node, error) {
+func taintedNodes(state State, allocs []*structs.Allocation) (map[string]*structs.Node, error) {
 	tainted := make(map[string]*structs.Node)
-	unknown := make(map[string]*structs.Node)
 
 	for _, alloc := range allocs {
-		// If already found in either map, continue
+		// If already found continue
 		if _, ok := tainted[alloc.NodeID]; ok {
-			continue
-		}
-		if _, ok := unknown[alloc.NodeID]; ok {
 			continue
 		}
 
@@ -369,7 +363,7 @@ func taintedAndUnknownNodes(state State, allocs []*structs.Allocation) (map[stri
 		ws := memdb.NewWatchSet()
 		node, err := state.NodeByID(ws, alloc.NodeID)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 
 		// If the node does not exist, we should migrate
@@ -384,12 +378,12 @@ func taintedAndUnknownNodes(state State, allocs []*structs.Allocation) (map[stri
 		}
 
 		// If the node is in the unknown state, add to the unknown set.
-		if node.Status == structs.NodeStatusUnknown {
-			unknown[alloc.NodeID] = node
+		if node.Status == structs.NodeStatusDisconnected {
+			tainted[alloc.NodeID] = node
 		}
 	}
 
-	return tainted, unknown, nil
+	return tainted, nil
 }
 
 // shuffleNodes randomizes the slice order with the Fisher-Yates algorithm

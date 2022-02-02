@@ -210,7 +210,8 @@ func (s *SystemScheduler) computeJobAllocs() error {
 	}
 
 	// Determine the tainted nodes containing job allocs
-	tainted, err := taintedAndUnknownNodes(s.state, allocs)
+	// TODO: Test if affected by disconnect/reconnect
+	tainted, err := taintedNodes(s.state, allocs)
 	if err != nil {
 		return fmt.Errorf("failed to get tainted nodes for job '%s': %v", s.eval.JobID, err)
 	}

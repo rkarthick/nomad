@@ -474,7 +474,7 @@ func TestTaintedNodes(t *testing.T) {
 		{NodeID: node4.ID},
 		{NodeID: "12345678-abcd-efab-cdef-123456789abc"},
 	}
-	tainted, err := taintedAndUnknownNodes(state, allocs)
+	tainted, err := taintedNodes(state, allocs)
 	require.NoError(t, err)
 	require.Equal(t, 3, len(tainted))
 	require.NotContains(t, tainted, node1.ID)

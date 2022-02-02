@@ -224,19 +224,21 @@ func (a allocSet) fromKeys(keys ...[]string) allocSet {
 	return from
 }
 
-// filterByTaintedAndUnknown takes a set of tainted nodes and filters the allocation set
+// TODO: This might need to be a new separate method to avoid impacting the
+// system scheduler OR the system scheduler may actually require updates.
+// groupByAllocOrNodeStatus takes a set of tainted nodes and filters the allocation set
 // into 5 groups:
 // 1. Those that exist on untainted nodes
 // 2. Those exist on nodes that are draining
 // 3. Those that exist on lost nodes
-// 4. Those that are on nodes that are in an unknown state, but have not had their ClientState set to unknown
+// 4. Those that are on nodes that are disconnected, but have not had their ClientState set to unknown
 // 5. Those that have had their ClientState set to unknown, but their node has reconnected.
-func (a allocSet) filterByTaintedAndUnknown(taintedNodes, unknownNodes map[string]*structs.Node) (untainted, migrate, lost, unknown, reconnectable allocSet) {
+func (a allocSet) groupByAllocOrNodeStatus(taintedNodes map[string]*structs.Node) (untainted, migrate, lost, disconnecting, reconnecting allocSet) {
 	untainted = make(map[string]*structs.Allocation)
 	migrate = make(map[string]*structs.Allocation)
 	lost = make(map[string]*structs.Allocation)
-	unknown = make(map[string]*structs.Allocation)
-	reconnectable = make(map[string]*structs.Allocation)
+	disconnecting = make(map[string]*structs.Allocation)
+	reconnecting = make(map[string]*structs.Allocation)
 
 	for _, alloc := range a {
 		// Terminal allocs are always untainted as they should never be migrated
@@ -251,21 +253,11 @@ func (a allocSet) filterByTaintedAndUnknown(taintedNodes, unknownNodes map[strin
 			continue
 		}
 
-		// Queue running allocs on a node that is in an unknown state to be marked as unknown.
-		_, ok := unknownNodes[alloc.NodeID]
-		if ok {
-			// TODO: Validate that this is the only state that should result in adding to this map.
-			if alloc.ClientStatus == structs.AllocClientStatusRunning {
-				unknown[alloc.ID] = alloc
-			}
-			continue
-		}
-
 		taintedNode, ok := taintedNodes[alloc.NodeID]
 		if !ok {
-			// Queue unknown allocs on a node that is now re-connected to be resumed.
+			// Queue allocs on a node that is now re-connected to be resumed.
 			if alloc.ClientStatus == structs.AllocClientStatusUnknown {
-				reconnectable[alloc.ID] = alloc
+				reconnecting[alloc.ID] = alloc
 				continue
 			}
 
@@ -274,6 +266,27 @@ func (a allocSet) filterByTaintedAndUnknown(taintedNodes, unknownNodes map[strin
 			continue
 		}
 
+		// TODO: I don't see how taintedNode can be nil at this point.
+		if taintedNode != nil {
+			// Group disconnecting/reconnecting
+			switch taintedNode.Status {
+			case structs.NodeStatusDisconnected:
+				// Queue running allocs on a node that is disconnected to be marked as unknown.
+				if alloc.ClientStatus == structs.AllocClientStatusRunning {
+					disconnecting[alloc.ID] = alloc
+					continue
+				}
+			case structs.NodeStatusReady:
+				// Queue unknown allocs on a node that is connected to reconnect.
+				if alloc.ClientStatus == structs.AllocClientStatusUnknown {
+					reconnecting[alloc.ID] = alloc
+					continue
+				}
+			default:
+			}
+		}
+
+		// TODO: I don't see how taintedNode can be nil at this point.
 		// Allocs on GC'd (nil) or lost nodes are Lost
 		if taintedNode == nil || taintedNode.TerminalStatus() {
 			lost[alloc.ID] = alloc
@@ -282,7 +295,9 @@ func (a allocSet) filterByTaintedAndUnknown(taintedNodes, unknownNodes map[strin
 
 		// All other allocs are untainted
 		untainted[alloc.ID] = alloc
+
 	}
+
 	return
 }
 
@@ -452,12 +467,10 @@ func (a allocSet) delayByStopAfterClientDisconnect() (later []*delayedReschedule
 
 // delayByStopAfterClientDisconnect returns a delay for any lost allocation that's got a
 // stop_after_client_disconnect configured
-func (a allocSet) delayByResumeAfterClientReconnect(disconnectedNodes map[string]*structs.Node) (later []*delayedRescheduleInfo, err error) {
-	now := time.Now().UTC()
-
+func (a allocSet) delayByResumeAfterClientReconnect(taintedNodes map[string]*structs.Node, now time.Time) (later []*delayedRescheduleInfo, err error) {
 	for _, alloc := range a {
-		node, ok := disconnectedNodes[alloc.NodeID]
-		if !ok {
+		node, ok := taintedNodes[alloc.NodeID]
+		if !ok || node.Status != structs.NodeStatusDisconnected {
 			err = errors.New("invalid disconnected set: node not disconnected")
 			return
 		}

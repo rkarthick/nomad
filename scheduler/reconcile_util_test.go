@@ -48,9 +48,9 @@ func TestAllocSet_filterByTainted(t *testing.T) {
 			ID:     "normal",
 			Status: structs.NodeStatusReady,
 		},
-		"unknown": {
-			ID:     "unknown",
-			Status: structs.NodeStatusUnknown,
+		"disconnected": {
+			ID:     "disconnected",
+			Status: structs.NodeStatusDisconnected,
 		},
 	}
 
@@ -116,44 +116,44 @@ func TestAllocSet_filterByTainted(t *testing.T) {
 			Job:          batchJob,
 			NodeID:       "lost",
 		},
-		// Non-terminal allocs on disconnected nodes are unknown
-		"unknown1": {
-			ID:           "unknown1",
+		// Non-terminal allocs on disconnected nodes are disconnecting
+		"disconnecting1": {
+			ID:           "disconnecting1",
 			ClientStatus: structs.AllocClientStatusRunning,
 			Job:          batchJob,
-			NodeID:       "unknown",
+			NodeID:       "disconnected",
 		},
-		// Non-terminal allocs on disconnected nodes are unknown
-		"unknown2": {
-			ID:           "unknown2",
+		// Non-terminal allocs on disconnected nodes are disconnecting
+		"disconnecting2": {
+			ID:           "disconnecting2",
 			ClientStatus: structs.AllocClientStatusRunning,
 			Job:          batchJob,
-			NodeID:       "unknown",
+			NodeID:       "disconnected",
 		},
-		// Non-terminal allocs on disconnected nodes are unknown
-		"unknown3": {
-			ID:           "unknown3",
+		// Non-terminal allocs on disconnected nodes are disconnecting
+		"disconnecting3": {
+			ID:           "disconnecting3",
 			ClientStatus: structs.AllocClientStatusRunning,
 			Job:          batchJob,
-			NodeID:       "unknown",
+			NodeID:       "disconnected",
 		},
-		// Unknown allocs on re-connected nodes are reconnectable
-		"reconnectable1": {
-			ID:           "reconnectable1",
+		// Unknown allocs on re-connected nodes are reconnecting
+		"reconnecting1": {
+			ID:           "reconnecting1",
 			ClientStatus: structs.AllocClientStatusUnknown,
 			Job:          batchJob,
 			NodeID:       "normal",
 		},
-		// Unknown allocs on re-connected nodes are reconnectable
-		"reconnectable2": {
-			ID:           "reconnectable2",
+		// Unknown allocs on re-connected nodes are reconnecting
+		"reconnecting2": {
+			ID:           "reconnecting2",
 			ClientStatus: structs.AllocClientStatusUnknown,
 			Job:          batchJob,
 			NodeID:       "normal",
 		},
 	}
 
-	untainted, migrate, lost, unknown, reconnectable := allocs.filterByTaintedAndUnknown(nodes)
+	untainted, migrate, lost, disconnecting, reconnecting := allocs.groupByAllocOrNodeStatus(nodes)
 	require.Len(t, untainted, 4)
 	require.Contains(t, untainted, "untainted1")
 	require.Contains(t, untainted, "untainted2")
@@ -165,11 +165,11 @@ func TestAllocSet_filterByTainted(t *testing.T) {
 	require.Len(t, lost, 2)
 	require.Contains(t, lost, "lost1")
 	require.Contains(t, lost, "lost2")
-	require.Len(t, unknown, 3)
-	require.Contains(t, unknown, "unknown1")
-	require.Contains(t, unknown, "unknown2")
-	require.Contains(t, unknown, "unknown3")
-	require.Len(t, reconnectable, 2)
-	require.Contains(t, reconnectable, "reconnectable1")
-	require.Contains(t, reconnectable, "reconnectable2")
+	require.Len(t, disconnecting, 3)
+	require.Contains(t, disconnecting, "disconnecting1")
+	require.Contains(t, disconnecting, "disconnecting2")
+	require.Contains(t, disconnecting, "disconnecting3")
+	require.Len(t, reconnecting, 2)
+	require.Contains(t, reconnecting, "reconnecting1")
+	require.Contains(t, reconnecting, "reconnecting2")
 }

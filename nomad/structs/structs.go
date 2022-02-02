@@ -1698,17 +1698,17 @@ func (ne *NodeEvent) AddDetail(k, v string) *NodeEvent {
 }
 
 const (
-	NodeStatusInit    = "initializing"
-	NodeStatusReady   = "ready"
-	NodeStatusDown    = "down"
-	NodeStatusUnknown = "unknown"
+	NodeStatusInit         = "initializing"
+	NodeStatusReady        = "ready"
+	NodeStatusDown         = "down"
+	NodeStatusDisconnected = "disconnected"
 )
 
 // ShouldDrainNode checks if a given node status should trigger an
 // evaluation. Some states don't require any further action.
 func ShouldDrainNode(status string) bool {
 	switch status {
-	case NodeStatusInit, NodeStatusReady, NodeStatusUnknown:
+	case NodeStatusInit, NodeStatusReady, NodeStatusDisconnected:
 		return false
 	case NodeStatusDown:
 		return true
@@ -1720,7 +1720,7 @@ func ShouldDrainNode(status string) bool {
 // ValidNodeStatus is used to check if a node status is valid
 func ValidNodeStatus(status string) bool {
 	switch status {
-	case NodeStatusInit, NodeStatusReady, NodeStatusDown, NodeStatusUnknown:
+	case NodeStatusInit, NodeStatusReady, NodeStatusDown, NodeStatusDisconnected:
 		return true
 	default:
 		return false
@@ -1957,6 +1957,10 @@ type Node struct {
 
 	// LastDrain contains metadata about the most recent drain operation
 	LastDrain *DrainMetadata
+
+	// ResumeAfterClientReconnect, if set, configures the client to allow placed
+	// allocations for tasks to attempt to resume running without a restart.
+	ResumeAfterClientReconnect *time.Duration
 
 	// Raft Indexes
 	CreateIndex uint64
@@ -6085,6 +6089,10 @@ type TaskGroup struct {
 	// StopAfterClientDisconnect, if set, configures the client to stop the task group
 	// after this duration since the last known good heartbeat
 	StopAfterClientDisconnect *time.Duration
+
+	// ResumeAfterClientReconnect, if set, configures the client to allow placed
+	// allocations for tasks in this group to attempt to resume running without a restart.
+	ResumeAfterClientReconnect *time.Duration
 }
 
 func (tg *TaskGroup) Copy() *TaskGroup {
@@ -9751,25 +9759,24 @@ func (a *Allocation) WaitClientStop() time.Time {
 }
 
 // ResumeTimeout uses the ResumeOnClientAfterReconnect to block rescheduling until
-// the interval passes
+// the interval passes.
 func (a *Allocation) ResumeTimeout(node *Node, now time.Time) time.Time {
+	// TODO: Handle infinite timeout.
 	tg := a.Job.LookupTaskGroup(a.TaskGroup)
 
 	// Prefer the duration from the task group.
-	timeout := tg.ResumeAfterClientDisconnect
+	timeout := tg.ResumeAfterClientReconnect
 	// If not configured on the task group, try the client.
 	if timeout == nil {
-		timeout = node.ResumeAfterClientDisconnect
+		timeout = node.ResumeAfterClientReconnect
 	}
 
 	// If not configured, return now
 	if timeout == nil {
-		timeout = now
-	} else {
-
+		return now
 	}
 
-	return timeout
+	return now.Add(*timeout)
 }
 
 // NextDelay returns a duration after which the allocation can be rescheduled.
@@ -10270,6 +10277,28 @@ func (a *AllocMetric) PopulateScoreMetaData() {
 	for i, item := range heapItems {
 		a.ScoreMetaData[i] = item.(*NodeScoreMeta)
 	}
+}
+
+// MaxNormScore returns the ScoreMetaData entry with the highest normalized
+// score.
+func (a *AllocMetric) MaxNormScore() *NodeScoreMeta {
+	if a == nil || len(a.ScoreMetaData) == 0 {
+		return nil
+	}
+
+	var maxNormScore *NodeScoreMeta
+	for _, scoreMetaData := range a.ScoreMetaData {
+		if maxNormScore == nil {
+			maxNormScore = scoreMetaData
+			continue
+		}
+
+		if scoreMetaData.NormScore > maxNormScore.NormScore {
+			maxNormScore = scoreMetaData
+		}
+	}
+
+	return maxNormScore
 }
 
 // NodeScoreMeta captures scoring meta data derived from

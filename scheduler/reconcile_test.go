@@ -256,6 +256,8 @@ type resultExpectation struct {
 	destructive       int
 	inplace           int
 	attributeUpdates  int
+	disconnectUpdates int
+	reconnectUpdates  int
 	stop              int
 	desiredTGUpdates  map[string]*structs.DesiredUpdates
 }
@@ -282,8 +284,46 @@ func assertResults(t *testing.T, r *reconcileResults, exp *resultExpectation) {
 	assertion.Len(r.destructiveUpdate, exp.destructive, "Expected Destructive")
 	assertion.Len(r.inplaceUpdate, exp.inplace, "Expected Inplace Updates")
 	assertion.Len(r.attributeUpdates, exp.attributeUpdates, "Expected Attribute Updates")
+	assertion.Len(r.reconnectUpdates, exp.reconnectUpdates, "Expected Reconnect Updates")
+	assertion.Len(r.disconnectUpdates, exp.disconnectUpdates, "Expected Disconnect Updates")
 	assertion.Len(r.stop, exp.stop, "Expected Stops")
 	assertion.EqualValues(exp.desiredTGUpdates, r.desiredTGUpdates, "Expected Desired TG Update Annotations")
+}
+
+func buildAllocations(job *structs.Job, count int, clientStatus, desiredStatus string) []*structs.Allocation {
+	allocs := make([]*structs.Allocation, 0)
+
+	for i := 0; i < count; i++ {
+		alloc := mock.Alloc()
+		alloc.Job = job
+		alloc.JobID = job.ID
+		alloc.NodeID = uuid.Generate()
+		alloc.Name = structs.AllocName(job.ID, job.TaskGroups[0].Name, uint(i))
+		alloc.ClientStatus = structs.AllocClientStatusRunning
+		alloc.DesiredStatus = structs.AllocDesiredStatusRun
+		allocs = append(allocs, alloc)
+	}
+
+	return allocs
+}
+
+func buildTaintedNodes(allocs []*structs.Allocation, count int) map[string]*structs.Node {
+	tainted := make(map[string]*structs.Node, count)
+	for i := 0; i < count; i++ {
+		n := mock.Node()
+		n.ID = allocs[i].NodeID
+		n.Status = structs.NodeStatusDisconnected
+		tainted[n.ID] = n
+	}
+	return tainted
+}
+
+func buildResumableAllocations(count int, clientStatus, desiredStatus string) (*structs.Job, []*structs.Allocation) {
+	job := mock.Job()
+	job.TaskGroups[0].ResumeAfterClientReconnect = helper.TimeToPtr(5 * time.Minute)
+	job.TaskGroups[0].Count = count
+
+	return job, buildAllocations(job, count, clientStatus, desiredStatus)
 }
 
 // Tests the reconciler properly handles placements for a job that has no
@@ -5017,5 +5057,159 @@ func TestReconciler_RescheduleNot_Batch(t *testing.T) {
 			},
 		},
 	})
+}
 
+// Tests that when a node disconnects running allocations are queued to transition to unknown.
+func TestReconciler_NodeDisconnect_Updates_Alloc_To_Unknown(t *testing.T) {
+	job, allocs := buildResumableAllocations(3, structs.AllocClientStatusRunning, structs.AllocDesiredStatusRun)
+	// Build a map of tainted nodes
+	tainted := buildTaintedNodes(allocs, 2)
+
+	reconciler := NewAllocReconciler(testlog.HCLogger(t), allocUpdateFnIgnore, true, job.ID, job,
+		nil, allocs, tainted, "", 50)
+	reconciler.now = time.Now().UTC()
+	r := reconciler.Compute()
+
+	// Verify that 2 follow up evals were created with the values we expect.
+	evals := r.desiredFollowupEvals[job.TaskGroups[0].Name]
+	require.Len(t, evals, 2)
+	expectedTime := reconciler.now.Add(5 * time.Minute)
+	for _, eval := range evals {
+		require.NotNil(t, eval.WaitUntil)
+		require.Equal(t, expectedTime, eval.WaitUntil)
+	}
+
+	// Validate that the queued disconnectUpdates have the right client status,
+	// and that they have a valid FollowUpdEvalID.
+	for _, allocUpdate := range r.disconnectUpdates {
+		require.Equal(t, structs.AllocClientStatusUnknown, allocUpdate.ClientStatus)
+		require.NotEmpty(t, allocUpdate.FollowupEvalID)
+
+		var followUpEval *structs.Evaluation
+		for _, eval := range evals {
+			if eval.ID == allocUpdate.FollowupEvalID {
+				followUpEval = eval
+				break
+			}
+		}
+
+		require.NotNil(t, followUpEval)
+	}
+
+	// 2 new placements and 2 alloc updates
+	assertResults(t, r, &resultExpectation{
+		createDeployment:  nil,
+		deploymentUpdates: nil,
+		place:             2,
+		stop:              0,
+		inplace:           0,
+		disconnectUpdates: 2,
+
+		// 2 to place and 1 to ignore
+		desiredTGUpdates: map[string]*structs.DesiredUpdates{
+			job.TaskGroups[0].Name: {
+				Place:         2,
+				Stop:          0,
+				Ignore:        1,
+				InPlaceUpdate: 0,
+			},
+		},
+	})
+
+}
+
+// Tests that when a node reconnects unknown allocations for that node are queued
+// to resume on the client, and that any replacement allocations that were scheduled
+// are queued to stop.
+func TestReconciler_NodeReconnect_ScaleIn_And_Reconnect_Unknown(t *testing.T) {
+	job, allocs := buildResumableAllocations(3, structs.AllocClientStatusUnknown, structs.AllocDesiredStatusRun)
+
+	// Create 3 existing allocs that should scale in, now that the node reconnects.
+	scaleInAllocs := buildAllocations(job, 3, structs.AllocClientStatusRunning, structs.AllocDesiredStatusRun)
+
+	reconciler := NewAllocReconciler(testlog.HCLogger(t), allocUpdateFnDestructive, true, job.ID, job,
+		nil, append(allocs, scaleInAllocs...), nil, "", 50)
+	reconciler.now = time.Now().UTC()
+	r := reconciler.Compute()
+
+	// Verify that 0 follow up evals were created.
+	evals := r.desiredFollowupEvals[job.TaskGroups[0].Name]
+	require.Len(t, evals, 0)
+
+	// Validate that the queued reconnectUpdates have the right client status,
+	// and that they have no FollowUpdEvalID.
+	for _, allocUpdate := range r.reconnectUpdates {
+		require.Equal(t, structs.AllocClientStatusUnknown, allocUpdate.ClientStatus)
+		require.Empty(t, allocUpdate.FollowupEvalID)
+		require.Equal(t, structs.AllocDesiredStatusRun, allocUpdate.DesiredStatus)
+	}
+
+	// No reschedule attempts were made and all allocs are untouched
+	assertResults(t, r, &resultExpectation{
+		createDeployment:  nil,
+		deploymentUpdates: nil,
+		place:             0,
+		stop:              3,
+		inplace:           0,
+		reconnectUpdates:  3,
+
+		// TODO: Figure out how this needs to change.
+		desiredTGUpdates: map[string]*structs.DesiredUpdates{
+			job.TaskGroups[0].Name: {
+				Place:             0,
+				Stop:              3,
+				DestructiveUpdate: 3,
+				Ignore:            0,
+				InPlaceUpdate:     0,
+			},
+		},
+	})
+}
+
+// Tests that the future timeout evals that get created when a node disconnects
+// stop once the duration passes.
+func TestReconciler_Disconnected_Node_FollowUpEvals_Stop_After_Timeout(t *testing.T) {
+	job, allocs := buildResumableAllocations(3, structs.AllocClientStatusUnknown, structs.AllocDesiredStatusRun)
+
+	reconciler := NewAllocReconciler(testlog.HCLogger(t), allocUpdateFnDestructive, true, job.ID, job,
+		nil, allocs, nil, "", 50)
+	reconciler.now = time.Now().UTC()
+	r := reconciler.Compute()
+
+	// Verify that n0 follow up evals were created.
+	evals := r.desiredFollowupEvals[job.TaskGroups[0].Name]
+	require.Len(t, evals, 0)
+
+	// TODO: Run one of these evals through the reconciler with the r.now == expiry
+
+	// TODO: Compare the original Allocs to the Stop set.
+	// Validate that the queued reconnectUpdates have the right client status,
+	// and that they have no FollowUpdEvalID.
+	for _, allocResult := range r.stop {
+		require.Equal(t, structs.AllocClientStatusLost, allocResult.alloc.ClientStatus)
+		require.Empty(t, allocResult.alloc.FollowupEvalID)
+		require.Equal(t, structs.AllocDesiredStatusStop, allocResult.alloc.DesiredStatus)
+	}
+
+	// No reschedule attempts were made and all allocs are untouched
+	assertResults(t, r, &resultExpectation{
+		createDeployment:  nil,
+		deploymentUpdates: nil,
+		place:             3,
+		stop:              0,
+		inplace:           0,
+		disconnectUpdates: 3,
+
+		// TODO: Figure out how this needs to change.
+		desiredTGUpdates: map[string]*structs.DesiredUpdates{
+			job.TaskGroups[0].Name: {
+				Place:         3,
+				Stop:          0,
+				Ignore:        0,
+				InPlaceUpdate: 0,
+			},
+		},
+	})
+
+	panic("not implemented")
 }
