@@ -433,7 +433,8 @@ func (a *allocReconciler) computeGroup(group string, all allocSet) bool {
 	lostLater := lost.delayByStopAfterClientDisconnect()
 	lostLaterEvals := a.handleDelayedLost(lostLater, tg.Name)
 
-	// Find delays for any allocs on disconnected nodes that have resume_after_client_reconnect
+	// Find delays for any disconnecting allocs that have resume_after_client_reconnect,
+	// create followup evals, and update the ClientStatus to unknown.
 	a.handleDisconnecting(disconnecting, tg.Name)
 
 	// Create batched follow-up evaluations for allocations that are
@@ -452,8 +453,7 @@ func (a *allocReconciler) computeGroup(group string, all allocSet) bool {
 	desiredChanges.Stop += uint64(len(stop))
 	untainted = untainted.difference(stop)
 
-	// Update the DesiredStatus of reconnectable allocations and queue them up to
-	// be synced by the client on next poll.
+	// Validate and queue up reconnecting allocs to be synced by the client on next poll.
 	a.handleReconnecting(reconnecting)
 
 	// Do inplace upgrades where possible and capture the set of upgrades that
@@ -471,8 +471,8 @@ func (a *allocReconciler) computeGroup(group string, all allocSet) bool {
 		untainted = untainted.difference(canaries)
 	}
 
-	// The fact that we have destructive updates and have less canaries than is
-	// desired means we need to create canaries
+	// The fact that we have destructive updates and have fewer canaries than is
+	// desired means we need to create canaries.
 	strategy := tg.Update
 	canariesPromoted := deploymentState != nil && deploymentState.Promoted
 	requireCanary := len(destructive) != 0 && strategy != nil && len(canaries) < strategy.Canary && !canariesPromoted
@@ -502,9 +502,10 @@ func (a *allocReconciler) computeGroup(group string, all allocSet) bool {
 	// * If there are any canaries that they have been promoted
 	// * There is no delayed stop_after_client_disconnect alloc, which delays scheduling for the whole group
 	// * An alloc was lost
+	// * There is not a corresponding reconnecting alloc.
 	var place []allocPlaceResult
 	if len(lostLater) == 0 {
-		place = a.computePlacements(tg, nameIndex, untainted, migrate, rescheduleNow, isCanarying, lost)
+		place = a.computePlacements(tg, nameIndex, untainted, migrate, rescheduleNow, reconnecting, isCanarying, lost)
 		if !existingDeployment {
 			deploymentState.DesiredTotal += len(place)
 		}
@@ -616,6 +617,7 @@ func (a *allocReconciler) computeGroup(group string, all allocSet) bool {
 		a.deployment.TaskGroups[group] = deploymentState
 	}
 
+	// TODO: Does this need to account for reconnects?
 	// deploymentComplete is whether the deployment is complete which largely
 	// means that no placements were made or desired to be made
 	deploymentComplete := len(destructive)+len(inplace)+len(place)+len(migrate)+len(rescheduleNow)+len(rescheduleLater) == 0 && !requireCanary
@@ -623,9 +625,10 @@ func (a *allocReconciler) computeGroup(group string, all allocSet) bool {
 	// Final check to see if the deployment is complete is to ensure everything
 	// is healthy
 	if deploymentComplete && a.deployment != nil {
-		if dstate, ok := a.deployment.TaskGroups[group]; ok {
-			if dstate.HealthyAllocs < helper.IntMax(dstate.DesiredTotal, dstate.DesiredCanaries) || // Make sure we have enough healthy allocs
-				(dstate.DesiredCanaries > 0 && !dstate.Promoted) { // Make sure we are promoted if we have canaries
+		var ok bool
+		if deploymentState, ok = a.deployment.TaskGroups[group]; ok {
+			if deploymentState.HealthyAllocs < helper.IntMax(deploymentState.DesiredTotal, deploymentState.DesiredCanaries) || // Make sure we have enough healthy allocs
+				(deploymentState.DesiredCanaries > 0 && !deploymentState.Promoted) { // Make sure we are promoted if we have canaries
 				deploymentComplete = false
 			}
 		}
@@ -759,7 +762,7 @@ func (a *allocReconciler) computeLimit(group *structs.TaskGroup, untainted, dest
 //
 // Placements will meet or exceed group count.
 func (a *allocReconciler) computePlacements(group *structs.TaskGroup,
-	nameIndex *allocNameIndex, untainted, migrate allocSet, reschedule allocSet,
+	nameIndex *allocNameIndex, untainted, migrate, reschedule, reconnecting allocSet,
 	canaryState bool, lost allocSet) []allocPlaceResult {
 
 	// Add rescheduled placement results
@@ -779,8 +782,9 @@ func (a *allocReconciler) computePlacements(group *structs.TaskGroup,
 	}
 
 	// Add replacements for lost allocs up to group.Count
-	existing := len(untainted) + len(migrate) + len(reschedule)
+	existing := len(untainted) + len(migrate) + len(reschedule) + len(reconnecting)
 
+	// Reschedule lost allocs.
 	for _, alloc := range lost {
 		if existing >= group.Count {
 			// Reached desired count, do not replace remaining lost
@@ -801,7 +805,7 @@ func (a *allocReconciler) computePlacements(group *structs.TaskGroup,
 		})
 	}
 
-	// Add remaining placement results
+	// If under-provisioned, add necessary placement results
 	if existing < group.Count {
 		for _, name := range nameIndex.Next(uint(group.Count - existing)) {
 			place = append(place, allocPlaceResult{
@@ -819,7 +823,7 @@ func (a *allocReconciler) computePlacements(group *structs.TaskGroup,
 // the group definition, the set of allocations in various states and whether we
 // are canarying.
 func (a *allocReconciler) computeStop(group *structs.TaskGroup, nameIndex *allocNameIndex,
-	untainted, migrate, lost, canaries, reconnecting allocSet, canaryState bool, followupEvals map[string]string) allocSet {
+	untainted, migrate, lost, canaries, reconnecting allocSet, isCanarying bool, followupEvals map[string]string) allocSet {
 
 	// Mark all lost allocations for stop.
 	var stop allocSet
@@ -827,7 +831,7 @@ func (a *allocReconciler) computeStop(group *structs.TaskGroup, nameIndex *alloc
 	a.markDelayed(lost, structs.AllocClientStatusLost, allocLost, followupEvals)
 
 	// If we are still deploying or creating canaries, don't stop them
-	if canaryState {
+	if isCanarying {
 		untainted = untainted.difference(canaries)
 	}
 
@@ -843,7 +847,7 @@ func (a *allocReconciler) computeStop(group *structs.TaskGroup, nameIndex *alloc
 
 	// Prefer stopping any alloc that has the same name as the canaries if we
 	// are promoted
-	if !canaryState && len(canaries) != 0 {
+	if !isCanarying && len(canaries) != 0 {
 		canaryNames := canaries.nameSet()
 		for id, alloc := range untainted.difference(canaries) {
 			if _, match := canaryNames[alloc.Name]; match {
@@ -885,9 +889,33 @@ func (a *allocReconciler) computeStop(group *structs.TaskGroup, nameIndex *alloc
 		}
 	}
 
-	// Compare reconnecting to allocs to the untainted and decide which to keep.
+	// Handle allocs that might be able to reconnect.
 	if len(reconnecting) != 0 {
 		for _, reconnectingAlloc := range reconnecting {
+			// If the reconnecting alloc's node has transitioned  to down because
+			// it has passed the timeout duration, mark reconnecting as lost,
+			// remove from set, and decrement remove.
+			if node, ok := a.taintedNodes[reconnectingAlloc.NodeID]; ok {
+				if node.Status == structs.NodeStatusDown {
+					stop[reconnectingAlloc.ID] = reconnectingAlloc
+					a.result.stop = append(a.result.stop, allocStopResult{
+						alloc:             reconnectingAlloc,
+						clientStatus:      structs.AllocClientStatusLost,
+						statusDescription: allocNotNeeded,
+					})
+					delete(reconnecting, reconnectingAlloc.ID)
+
+					remove--
+					// If we've removed all we need to, stop iterating and return.
+					if remove == 0 {
+						return stop
+					}
+					// Otherwise, continue to next alloc.
+					continue
+				}
+			}
+
+			// Compare reconnecting to untainted and decide which to keep.
 			for _, untaintedAlloc := range untainted {
 				// If not a match by name go to next
 				if reconnectingAlloc.Name != untaintedAlloc.Name {
@@ -1022,24 +1050,16 @@ func (a *allocReconciler) handleDelayedReschedules(rescheduleLater []*delayedRes
 // set to running, and these allocs are appended to the Plan as non-destructive
 // updates. Clients are responsible for reconciling the DesiredState with the
 // actual state as the node comes back online.
-func (a *allocReconciler) handleReconnecting(reconnectables allocSet) {
-	if len(reconnectables) == 0 {
+func (a *allocReconciler) handleReconnecting(reconnecting allocSet) {
+	if len(reconnecting) == 0 {
 		return
 	}
 
-	// TODO: Remove before merge. This is debug code to prove this never gets called twice.
-	// This should just initialize the map.
-	if len(a.result.reconnectUpdates) == 0 {
-		a.result.reconnectUpdates = make(map[string]*structs.Allocation)
-	} else {
-		a.logger.Debug("reconnectable updates already initialized")
-	}
-
-	// Create updates that will be applied to the allocs to mark the FollowupEvalID
-	for _, alloc := range reconnectables {
+	// Create updates that will be appended to the plan.
+	for _, alloc := range reconnecting {
 		// If the ClientStatus isn't what we are targeting, skip the alloc.
 		if alloc.ClientStatus != structs.AllocClientStatusUnknown {
-			a.logger.Debug(fmt.Sprintf("alloc %s - %s queued for reconnect with bad status:  %s", alloc.ID, alloc.Name, alloc.ClientStatus))
+			a.logger.Debug(fmt.Sprintf("alloc %s - %s queued for reconnect with invalid status:  %s", alloc.ID, alloc.Name, alloc.ClientStatus))
 			continue
 		}
 
@@ -1061,6 +1081,8 @@ func (a *allocReconciler) handleReconnecting(reconnectables allocSet) {
 			continue
 		}
 
+		// TODO: Discuss with Tim. Do we need to make a copy if we aren't mutating
+		// or is that just memory inefficiency for no good reason?
 		a.result.reconnectUpdates[alloc.ID] = alloc.Copy()
 	}
 }
@@ -1129,8 +1151,7 @@ func (a *allocReconciler) handleDelayedLost(rescheduleLater []*delayedReschedule
 
 // handleDisconnecting creates followup evaluations with the
 // WaitUntil field set for allocations in an unknown state on disconnected nodes.
-// Followup Evals are appended to a.result as a side effect, we return a
-// map of alloc IDs to their followupEval IDs.
+// Followup Evals are appended to a.result as a side effect.
 func (a *allocReconciler) handleDisconnecting(disconnecting allocSet, tgName string) {
 	if len(disconnecting) == 0 {
 		return
@@ -1175,6 +1196,7 @@ func (a *allocReconciler) handleDisconnecting(disconnecting allocSet, tgName str
 		evals = append(evals, eval)
 
 		// Create updates that will be applied to the allocs to mark the FollowupEvalID
+		// and the unknown ClientStatus.
 		updatedAlloc := timeoutInfo.alloc.Copy()
 		updatedAlloc.ClientStatus = structs.AllocClientStatusUnknown
 		updatedAlloc.FollowupEvalID = eval.ID

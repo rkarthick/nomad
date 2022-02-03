@@ -374,7 +374,7 @@ func (s *GenericScheduler) computeJobAllocs() error {
 	s.plan.Deployment = results.deployment
 	s.plan.DeploymentUpdates = results.deploymentUpdates
 
-	// Store all the follow up evaluations from rescheduled allocations
+	// Store all the followup evaluations from rescheduled allocations
 	if len(results.desiredFollowupEvals) > 0 {
 		for _, evals := range results.desiredFollowupEvals {
 			s.followUpEvals = append(s.followUpEvals, evals...)
@@ -428,24 +428,19 @@ func (s *GenericScheduler) computeJobAllocs() error {
 		return nil
 	}
 
-	// Record the number of allocations that needs to be placed per Task Group
-	for _, place := range results.place {
-		s.queuedAllocs[place.taskGroup.Name] += 1
-	}
-	for _, destructive := range results.destructiveUpdate {
-		s.queuedAllocs[destructive.placeTaskGroup.Name] += 1
-	}
-
 	// Compute the placements
 	place := make([]placementResult, 0, len(results.place))
 	for _, p := range results.place {
+		s.queuedAllocs[p.taskGroup.Name] += 1
 		place = append(place, p)
 	}
 
 	destructive := make([]placementResult, 0, len(results.destructiveUpdate))
 	for _, p := range results.destructiveUpdate {
+		s.queuedAllocs[p.placeTaskGroup.Name] += 1
 		destructive = append(destructive, p)
 	}
+
 	return s.computePlacements(destructive, place)
 }
 

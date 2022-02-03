@@ -266,7 +266,6 @@ func (a allocSet) groupByAllocOrNodeStatus(taintedNodes map[string]*structs.Node
 			continue
 		}
 
-		// TODO: I don't see how taintedNode can be nil at this point.
 		if taintedNode != nil {
 			// Group disconnecting/reconnecting
 			switch taintedNode.Status {
@@ -286,7 +285,6 @@ func (a allocSet) groupByAllocOrNodeStatus(taintedNodes map[string]*structs.Node
 			}
 		}
 
-		// TODO: I don't see how taintedNode can be nil at this point.
 		// Allocs on GC'd (nil) or lost nodes are Lost
 		if taintedNode == nil || taintedNode.TerminalStatus() {
 			lost[alloc.ID] = alloc
