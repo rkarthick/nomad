@@ -10546,7 +10546,8 @@ type Evaluation struct {
 	Wait time.Duration
 
 	// WaitUntil is the time when this eval should be run. This is used to
-	// supported delayed rescheduling of failed allocations
+	// supported delayed rescheduling of failed allocations, and delayed
+	// stopping of allocations that are configured with resume_after_client_reconnect.
 	WaitUntil time.Time
 
 	// NextEval is the evaluation ID for the eval created to do a followup.

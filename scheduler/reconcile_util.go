@@ -475,13 +475,15 @@ func (a allocSet) delayByResumeAfterClientReconnect(taintedNodes map[string]*str
 
 		timeout := alloc.ResumeTimeout(node, now)
 
-		if timeout.After(now) {
-			later = append(later, &delayedRescheduleInfo{
-				allocID:        alloc.ID,
-				alloc:          alloc,
-				rescheduleTime: timeout,
-			})
+		if !timeout.After(now) {
+			continue
 		}
+
+		later = append(later, &delayedRescheduleInfo{
+			allocID:        alloc.ID,
+			alloc:          alloc,
+			rescheduleTime: timeout,
+		})
 	}
 
 	return

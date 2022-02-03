@@ -61,6 +61,11 @@ const (
 	// up evals for delayed rescheduling
 	reschedulingFollowupEvalDesc = "created for delayed rescheduling"
 
+	// disconnectTimeoutFollowupEvalDesc is the description used when creating follow
+	// up evals for allocations that be should be stopped after its disconnect
+	// threshold has passed.
+	disconnectTimeoutFollowupEvalDesc = "created delayed stop after disconnect timeout"
+
 	// maxPastRescheduleEvents is the maximum number of past reschedule event
 	// that we track when unlimited rescheduling is enabled
 	maxPastRescheduleEvents = 5
