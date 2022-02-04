@@ -435,7 +435,10 @@ func (a *allocReconciler) computeGroup(group string, all allocSet) bool {
 
 	// Find delays for any disconnecting allocs that have resume_after_client_reconnect,
 	// create followup evals, and update the ClientStatus to unknown.
-	a.handleDisconnecting(disconnecting, tg.Name)
+	timeoutLaterEvals := a.handleDisconnecting(disconnecting, tg.Name)
+	// now merge this set into the lostLaterEvals so that computeStop can add
+	// them to the stop set.
+	lostLaterEvals = helper.MergeMapStringString(lostLaterEvals, timeoutLaterEvals)
 
 	// Create batched follow-up evaluations for allocations that are
 	// reschedulable later and mark the allocations for in place updating
@@ -700,7 +703,7 @@ func (a *allocReconciler) handleGroupCanaries(all allocSet, desiredChanges *stru
 		}
 
 		canaries = all.fromKeys(canaryIDs)
-		// TODO: Validate that this is side-effect free or if it's affected by resume_after_client_reconnect
+		// TODO: Validate that this is side-effect free or if it's affected by disconnect/reconnect
 		untainted, migrate, lost, _, _ := canaries.groupByAllocOrNodeStatus(a.taintedNodes)
 		a.markStop(migrate, "", allocMigrating)
 		a.markStop(lost, structs.AllocClientStatusLost, allocLost)
@@ -894,7 +897,10 @@ func (a *allocReconciler) computeStop(group *structs.TaskGroup, nameIndex *alloc
 		for _, reconnectingAlloc := range reconnecting {
 			// TODO: Test to see if it's possible to create a race where the
 			// the node is not yet marked down, but the eval's WaitUntil expires
-			// and this get's triggered.
+			// and this gets triggered.
+
+			// TODO: Discuss with team. This next block might not be necessary,
+			// OR it might be a way to guard against a flapping node by just continuing.
 
 			// If the reconnecting alloc's node has transitioned to down because
 			// it has passed the timeout duration, mark reconnecting as lost,
@@ -1162,23 +1168,22 @@ func (a *allocReconciler) handleDelayedLost(rescheduleLater []*delayedReschedule
 
 // handleDisconnecting creates followup evaluations with the
 // WaitUntil field set for allocations in an unknown state on disconnected nodes.
-// Followup Evals are appended to a.result as a side effect. By the time the
-// followup eval triggers, the node should be marked as down.
-func (a *allocReconciler) handleDisconnecting(disconnecting allocSet, tgName string) {
+// Followup Evals are appended to a.result as a side effect.
+func (a *allocReconciler) handleDisconnecting(disconnecting allocSet, tgName string) map[string]string {
 	if len(disconnecting) == 0 {
-		return
+		return map[string]string{}
 	}
 
 	// TODO: Handle infinite timeout.
 	timeoutLater, err := disconnecting.delayByResumeAfterClientReconnect(a.taintedNodes, a.now)
 	if err != nil {
 		a.logger.Debug(fmt.Sprintf("error computing disconnecting timeouts for task_group.name %q: %s", tgName, err))
-		return
+		return map[string]string{}
 	}
 
 	if len(timeoutLater) == 0 {
 		a.logger.Debug(fmt.Sprintf("no disconnecting allocs found for task_group.name %q", tgName))
-		return
+		return map[string]string{}
 	}
 
 	// Sort by time
@@ -1188,6 +1193,7 @@ func (a *allocReconciler) handleDisconnecting(disconnecting allocSet, tgName str
 
 	var evals []*structs.Evaluation
 	nextReschedTime := timeoutLater[0].rescheduleTime
+	allocIDToFollowupEvalID := make(map[string]string, len(timeoutLater))
 
 	// Create a new eval batch based on the first allocation.
 	eval := &structs.Evaluation{
@@ -1211,40 +1217,45 @@ func (a *allocReconciler) handleDisconnecting(disconnecting allocSet, tgName str
 	// that the batch window (5s) it creates another batch.
 	for _, timeoutInfo := range timeoutLater {
 		// If more than 5s in the future, create another eval batch.
-		if timeoutInfo.rescheduleTime.Sub(nextReschedTime) > batchedFailedAllocWindowSize {
-			eval = &structs.Evaluation{
-				ID:        uuid.Generate(),
-				Namespace: a.job.Namespace,
-				Priority:  a.evalPriority,
-				Type:      a.job.Type,
-				// TODO: Review this new status with team.
-				TriggeredBy:    structs.EvalTriggerResumeTimeout,
-				JobID:          a.job.ID,
-				JobModifyIndex: a.job.ModifyIndex,
-				Status:         structs.EvalStatusPending,
-				// TODO: Review this new description with the team.
-				StatusDescription: disconnectTimeoutFollowupEvalDesc,
-				WaitUntil:         timeoutInfo.rescheduleTime,
+		if timeoutInfo.rescheduleTime.Sub(nextReschedTime) < batchedFailedAllocWindowSize {
+			if timeoutInfo.rescheduleTime.Sub(nextReschedTime) < batchedFailedAllocWindowSize {
+				allocIDToFollowupEvalID[timeoutInfo.allocID] = eval.ID
+			} else {
+				eval = &structs.Evaluation{
+					ID:        uuid.Generate(),
+					Namespace: a.job.Namespace,
+					Priority:  a.evalPriority,
+					Type:      a.job.Type,
+					// TODO: Review this new status with team.
+					TriggeredBy:    structs.EvalTriggerResumeTimeout,
+					JobID:          a.job.ID,
+					JobModifyIndex: a.job.ModifyIndex,
+					Status:         structs.EvalStatusPending,
+					// TODO: Review this new description with the team.
+					StatusDescription: disconnectTimeoutFollowupEvalDesc,
+					WaitUntil:         timeoutInfo.rescheduleTime,
+				}
+				evals = append(evals, eval)
+				allocIDToFollowupEvalID[timeoutInfo.allocID] = eval.ID
 			}
-			evals = append(evals, eval)
+
+			// Create updates that will be applied to the allocs to mark the FollowupEvalID
+			// and the unknown ClientStatus.
+			updatedAlloc := timeoutInfo.alloc.Copy()
+			updatedAlloc.ClientStatus = structs.AllocClientStatusUnknown
+			updatedAlloc.FollowupEvalID = eval.ID
+			a.result.disconnectUpdates[updatedAlloc.ID] = updatedAlloc
+
+			// TODO: It doesn't seem appropriate to include this function's results in these metrics.
+			// Should we create a new metric?
+			// emitRescheduleInfo(timeoutInfo.alloc, eval)
 		}
-
-		// Create updates that will be applied to the allocs to mark the FollowupEvalID
-		// and the unknown ClientStatus.
-		updatedAlloc := timeoutInfo.alloc.Copy()
-		updatedAlloc.ClientStatus = structs.AllocClientStatusUnknown
-		updatedAlloc.FollowupEvalID = eval.ID
-		a.result.disconnectUpdates[updatedAlloc.ID] = updatedAlloc
-
-		// TODO: It doesn't seem appropriate to include this function's results in these metrics.
-		// Is this a new metric?
-		// emitRescheduleInfo(timeoutInfo.alloc, eval)
 	}
 
 	// TODO: Make sure it's ok to reuse this map.
 	a.appendFollowupEvals(tgName, evals)
 
-	return
+	return allocIDToFollowupEvalID
 }
 
 // appendFollowupEvals appends a set of followup evals for task group to the
@@ -1258,7 +1269,7 @@ func (a *allocReconciler) appendFollowupEvals(tgName string, evals []*structs.Ev
 	a.result.desiredFollowupEvals[tgName] = evals
 }
 
-// emitRescheduleInfo emits metrics about the reschedule decision of an evaluation. If a followup evaluation is
+// emitRescheduleInfo emits metrics about the rescheduling decision of an evaluation. If a followup evaluation is
 // provided, the waitUntil time is emitted.
 func emitRescheduleInfo(alloc *structs.Allocation, followupEval *structs.Evaluation) {
 	// Emit short-lived metrics data point. Note, these expire and stop emitting after about a minute.

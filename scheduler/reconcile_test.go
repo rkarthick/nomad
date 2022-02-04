@@ -5216,14 +5216,13 @@ func TestReconciler_Disconnected_Node_FollowUpEvals_Stop_After_Timeout(t *testin
 	eval := evals[0]
 
 	// Set the NodeStatus to Down on the 2 disconnected nodes to simulate that
-	// the resume duration has passed. The node status is actually what the
-	// reconciler uses to trigger a stop on unknown allocs.
+	// the resume duration has passed.
 	for _, node := range nodes {
 		node.Status = structs.NodeStatusDown
 	}
 
-	// Replace the allocs that were originally passed with the updated copies that
-	// now have the unknown ClientStatus.
+	// Replace the allocs that were originally created with the updated copies that
+	// have the unknown ClientStatus.
 	for i, alloc := range allocs {
 		for id, updated := range results.disconnectUpdates {
 			if alloc.ID == id {
