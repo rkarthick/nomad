@@ -895,6 +895,41 @@ func (a *allocReconciler) computeStop(group *structs.TaskGroup, nameIndex *alloc
 	// Handle allocs that might be able to reconnect.
 	if len(reconnecting) != 0 {
 		for _, reconnectingAlloc := range reconnecting {
+			// if the desired status is not run, stop the allocation.
+			if reconnectingAlloc.DesiredStatus != structs.AllocDesiredStatusRun {
+				stop[reconnectingAlloc.ID] = reconnectingAlloc
+				a.result.stop = append(a.result.stop, allocStopResult{
+					alloc:             reconnectingAlloc,
+					statusDescription: allocNotNeeded,
+				})
+				delete(reconnecting, reconnectingAlloc.ID)
+
+				remove--
+				// if we've removed all we need to, stop iterating and return.
+				if remove == 0 {
+					return stop
+				}
+			}
+
+			// if the desired transition is not run, stop the allocation.
+			if reconnectingAlloc.DesiredTransition.ShouldMigrate() ||
+				reconnectingAlloc.DesiredTransition.ShouldReschedule() ||
+				reconnectingAlloc.DesiredTransition.ShouldForceReschedule() {
+
+				stop[reconnectingAlloc.ID] = reconnectingAlloc
+				a.result.stop = append(a.result.stop, allocStopResult{
+					alloc:             reconnectingAlloc,
+					statusDescription: allocNotNeeded,
+				})
+				delete(reconnecting, reconnectingAlloc.ID)
+
+				remove--
+				// if we've removed all we need to, stop iterating and return.
+				if remove == 0 {
+					return stop
+				}
+			}
+
 			// TODO: Test to see if it's possible to create a race where the
 			// the node is not yet marked down, but the eval's WaitUntil expires
 			// and this gets triggered.
@@ -1067,6 +1102,7 @@ func (a *allocReconciler) handleReconnecting(reconnecting allocSet) {
 
 	// Create updates that will be appended to the plan.
 	for _, alloc := range reconnecting {
+		// TODO: Should we remove these guards? It should have been picked up during computeStop.
 		// If the ClientStatus isn't what we are targeting, skip the alloc.
 		if alloc.ClientStatus != structs.AllocClientStatusUnknown {
 			a.logger.Debug(fmt.Sprintf("alloc %s - %s queued for reconnect with invalid status:  %s", alloc.ID, alloc.Name, alloc.ClientStatus))

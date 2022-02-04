@@ -43,12 +43,6 @@ const (
 	// allocRescheduled is the status used when an allocation failed and was rescheduled
 	allocRescheduled = "alloc was rescheduled because it failed"
 
-	// allocUnknown is the status used when the node the allocations is on has
-	// failed its heartbeat grace period, but is configured to resume after the
-	// client reconnects. Resuming means that healthy, running allocations on the
-	// reconnecting client should re-attach rather than stop and restart.
-	allocUnknown = "alloc is unknown since its node is disconnected"
-
 	// blockedEvalMaxPlanDesc is the description used for blocked evals that are
 	// a result of hitting the max number of plan attempts
 	blockedEvalMaxPlanDesc = "created due to placement conflicts"
