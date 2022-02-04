@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math/rand"
 	"reflect"
@@ -376,11 +377,18 @@ func taintedNodes(state State, allocs []*structs.Allocation) (map[string]*struct
 	return out, nil
 }
 
-// shuffleNodes randomizes the slice order with the Fisher-Yates algorithm
-func shuffleNodes(nodes []*structs.Node) {
+// shuffleNodes randomizes the slice order with the Fisher-Yates
+// algorithm. We seed the random source with the eval ID (which is
+// random) to aid in postmortem debuggging of specific evaluations and
+// state snapshots.
+func shuffleNodes(evalID string, nodes []*structs.Node) {
+
+	seed, _ := binary.Varint([]byte(evalID))
+	r := rand.New(rand.NewSource(seed))
+
 	n := len(nodes)
 	for i := n - 1; i > 0; i-- {
-		j := rand.Intn(i + 1)
+		j := r.Intn(i + 1)
 		nodes[i], nodes[j] = nodes[j], nodes[i]
 	}
 }

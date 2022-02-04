@@ -507,7 +507,7 @@ func TestShuffleNodes(t *testing.T) {
 	}
 	orig := make([]*structs.Node, len(nodes))
 	copy(orig, nodes)
-	shuffleNodes(nodes)
+	shuffleNodes(uuid.Generate(), nodes)
 	require.False(t, reflect.DeepEqual(nodes, orig))
 }
 

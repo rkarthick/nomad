@@ -70,7 +70,7 @@ type GenericStack struct {
 
 func (s *GenericStack) SetNodes(baseNodes []*structs.Node) {
 	// Shuffle base nodes
-	shuffleNodes(baseNodes)
+	shuffleNodes(s.ctx.Plan().EvalID, baseNodes)
 
 	// Update the set of base nodes
 	s.source.SetNodes(baseNodes)
