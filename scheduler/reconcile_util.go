@@ -53,21 +53,6 @@ type allocStopResult struct {
 	followupEvalID    string
 }
 
-// TODO: Can we just rename allocStopResult to allocWithFollowupResult and resuse the type?
-// allocUnknownResult contains the information required to mark a single allocation as unknown.
-type allocUnknownResult struct {
-	alloc          *structs.Allocation
-	followupEvalID string
-}
-
-func (r *allocUnknownResult) ClientStatus() string {
-	return structs.AllocClientStatusUnknown
-}
-
-func (r *allocUnknownResult) StatusDescription() string {
-	return allocUnknown
-}
-
 // allocPlaceResult contains the information required to place a single
 // allocation
 type allocPlaceResult struct {
@@ -301,7 +286,7 @@ func (a allocSet) groupByAllocOrNodeStatus(taintedNodes map[string]*structs.Node
 
 // filterByRescheduleable filters the allocation set to return the set of allocations that are either
 // untainted or a set of allocations that must be rescheduled now. Allocations that can be rescheduled
-// at a future time are also returned so that we can create follow-up evaluations for them. Allocs are
+// at a future time are also returned so that we can create followup evaluations for them. Allocs are
 // skipped or considered untainted according to logic defined in shouldFilter method.
 func (a allocSet) filterByRescheduleable(isBatch bool, now time.Time, evalID string, deployment *structs.Deployment) (untainted, rescheduleNow allocSet, rescheduleLater []*delayedRescheduleInfo) {
 	untainted = make(map[string]*structs.Allocation)
@@ -463,11 +448,13 @@ func (a allocSet) delayByStopAfterClientDisconnect() (later []*delayedReschedule
 	return later
 }
 
-// delayByStopAfterClientDisconnect returns a delay for any lost allocation that's got a
-// stop_after_client_disconnect configured
+// delayByResumeAfterClientReconnect returns a delay for any unknown allocation
+// that's got a resume_after_client_reconnect configured
 func (a allocSet) delayByResumeAfterClientReconnect(taintedNodes map[string]*structs.Node, now time.Time) (later []*delayedRescheduleInfo, err error) {
 	for _, alloc := range a {
 		node, ok := taintedNodes[alloc.NodeID]
+		// TODO: This shouldn't really possible by this point because of the groupBy
+		// function. Maybe we should remove this defensive guard?
 		if !ok || node.Status != structs.NodeStatusDisconnected {
 			err = errors.New("invalid disconnected set: node not disconnected")
 			return

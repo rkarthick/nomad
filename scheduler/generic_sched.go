@@ -47,7 +47,7 @@ const (
 	// failed its heartbeat grace period, but is configured to resume after the
 	// client reconnects. Resuming means that healthy, running allocations on the
 	// reconnecting client should re-attach rather than stop and restart.
-	allocUnknown = "alloc is unknown since its node is unknown"
+	allocUnknown = "alloc is unknown since its node is disconnected"
 
 	// blockedEvalMaxPlanDesc is the description used for blocked evals that are
 	// a result of hitting the max number of plan attempts
@@ -63,7 +63,7 @@ const (
 
 	// disconnectTimeoutFollowupEvalDesc is the description used when creating follow
 	// up evals for allocations that be should be stopped after its disconnect
-	// threshold has passed.
+	// timeout has passed.
 	disconnectTimeoutFollowupEvalDesc = "created delayed stop after disconnect timeout"
 
 	// maxPastRescheduleEvents is the maximum number of past reschedule event
@@ -355,7 +355,7 @@ func (s *GenericScheduler) computeJobAllocs() error {
 	// Determine the tainted nodes containing job allocs
 	tainted, err := taintedNodes(s.state, allocs)
 	if err != nil {
-		return fmt.Errorf("failed to get tainted and unknown nodes for job '%s': %v",
+		return fmt.Errorf("failed to get tainted and disconnected nodes for job '%s': %v",
 			s.eval.JobID, err)
 	}
 
